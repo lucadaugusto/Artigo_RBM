@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Digital Shadow — FIWARE Plant Monitor</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',Arial,sans-serif;background:#0d1117;color:#c9d1d9}
+
+header{background:#161b22;border-bottom:1px solid #30363d;padding:12px 24px;
+  display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}
+header h1{font-size:1.05rem;color:#58a6ff;letter-spacing:1px}
+.meta{display:flex;gap:18px;font-size:0.75rem;color:#8b949e;align-items:center}
+.meta b{color:#c9d1d9}
+.badge{font-size:0.65rem;padding:2px 7px;border-radius:4px;border:1px solid #30363d;
+  color:#8b949e;margin-left:5px}
+.badge.ok{border-color:#238636;color:#3fb950}
+.badge.warn{border-color:#e3b341;color:#e3b341}
+.badge.err{border-color:#da3633;color:#f85149;animation:blink .7s infinite alternate}
+@keyframes blink{to{opacity:.3}}
+
+main{padding:14px;max-width:1400px;margin:0 auto}
+
+/* ── Pipeline ── */
+.pipeline-wrap{background:#161b22;border:1px solid #30363d;border-radius:12px;
+  padding:18px 20px 22px;margin-bottom:12px}
+.section-title{font-size:0.7rem;color:#8b949e;letter-spacing:1px;
+  text-transform:uppercase;margin-bottom:14px}
+.pipeline{display:flex;align-items:center;gap:0;overflow-x:auto;padding-bottom:4px}
+
+.pnode{display:flex;flex-direction:column;align-items:center;min-width:130px}
+.pbox{width:140px;height:128px;border-radius:14px;border:2px solid #30363d;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:5px;position:relative;transition:border-color .4s,box-shadow .4s}
+.pbox.RUNNING{border-color:#238636;box-shadow:0 0 18px rgba(35,134,54,.4)}
+.pbox.FAULT{border-color:#da3633;animation:fault-box .7s ease-in-out infinite alternate}
+.pbox.BLOCKED{border-color:#e3b341;box-shadow:0 0 12px rgba(227,179,65,.3)}
+.pbox.IDLE{border-color:#484f58}
+@keyframes fault-box{to{box-shadow:0 0 22px rgba(248,81,73,.7)}}
+
+.icon{font-size:2.6rem;line-height:1}
+.icon.running{animation:spin 2.4s linear infinite}
+.icon.press{animation:press 1.1s ease-in-out infinite}
+.icon.fault{animation:flash .5s alternate infinite}
+.icon.blocked{opacity:.7}
+.icon.idle{opacity:.4}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes press{0%,100%{transform:scaleY(1)}45%{transform:scaleY(.72) translateY(5px)}}
+@keyframes flash{to{opacity:.1}}
+
+.pname{font-size:0.65rem;font-weight:bold;color:#8b949e;letter-spacing:.8px;
+  text-transform:uppercase}
+.pval{font-size:1.3rem;font-weight:bold;color:#e6edf3}
+.pstate{font-size:0.58rem;color:#8b949e;letter-spacing:.4px}
+.psub{font-size:0.6rem;margin-top:7px;color:#8b949e;text-align:center;line-height:1.5}
+
+.sdot{position:absolute;top:7px;right:7px;width:8px;height:8px;border-radius:50%;
+  background:#484f58;transition:background .3s}
+.sdot.RUNNING{background:#3fb950;animation:pulse 1.5s infinite}
+.sdot.FAULT{background:#f85149}
+.sdot.BLOCKED{background:#e3b341}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.2}}
+
+.fault-badge{font-size:0.6rem;font-weight:bold;color:#f85149;
+  background:rgba(248,81,73,.1);border:1px solid rgba(248,81,73,.35);
+  border-radius:4px;padding:2px 6px;margin-top:4px;
+  animation:blink 1s ease-in-out infinite alternate;display:none}
+
+.conn{flex:1;min-width:24px;max-width:60px;height:4px;border-radius:2px;
+  background:#21262d;position:relative;overflow:hidden}
+.conn.flowing::after,.conn.blocked-flow::after{content:'';position:absolute;
+  top:0;left:-60px;width:60px;height:100%;animation:flow 1.1s linear infinite}
+.conn.flowing::after{background:linear-gradient(90deg,transparent,#3fb950,transparent)}
+.conn.blocked-flow::after{background:linear-gradient(90deg,transparent,#e3b341,transparent);
+  animation-duration:2s}
+@keyframes flow{to{left:100%}}
+
+/* ── KPIs ── */
+.kpi-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:12px}
+.kpi{background:#161b22;border:1px solid #30363d;border-radius:10px;
+  padding:10px 14px;text-align:center}
+.kpi.hi{border-color:#238636}
+.kpi.wa{border-color:#e3b341}
+.kpi .val{font-size:1.3rem;font-weight:bold;color:#58a6ff}
+.kpi.hi .val{color:#3fb950}
+.kpi.wa .val{color:#e3b341}
+.kpi .lbl{font-size:0.66rem;color:#8b949e;margin-top:3px}
+.kpi .sub{font-size:0.58rem;color:#484f58;margin-top:1px}
+
+/* ── Charts ── */
+.chart-grid{display:grid;grid-template-columns:2fr 1fr 1fr;gap:10px;margin-bottom:10px}
+.chart-wide{grid-column:1/-1}
+.card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:14px}
+.card h3{font-size:0.68rem;color:#8b949e;margin-bottom:10px;
+  text-transform:uppercase;letter-spacing:.5px}
+
+/* ── Histórico table ── */
+.hist-table{width:100%;border-collapse:collapse;font-size:0.7rem}
+.hist-table th{color:#8b949e;padding:4px 8px;text-align:left;
+  border-bottom:1px solid #30363d}
+.hist-table td{padding:4px 8px;border-bottom:1px solid #1c2128;color:#c9d1d9}
+.hist-table tr:hover td{background:#1c2128}
+
+/* ── Connection status bar ── */
+.status-bar{display:flex;gap:12px;font-size:0.68rem;margin-bottom:10px;
+  background:#161b22;border:1px solid #30363d;border-radius:8px;padding:8px 14px;
+  flex-wrap:wrap}
+.svc{display:flex;align-items:center;gap:5px}
+.dot-svc{width:7px;height:7px;border-radius:50%;background:#484f58}
+.dot-svc.up{background:#3fb950}
+.dot-svc.down{background:#f85149}
+
+@media(max-width:700px){
+  .chart-grid,.kpi-grid{grid-template-columns:repeat(2,1fr)}
+  .pipeline{justify-content:flex-start}
+}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>&#11041; Digital Shadow — FIWARE Plant Monitor</h1>
+  <div class="meta">
+    <span>Atualizado: <b id="h-ts">—</b></span>
+    <span>Orion: <b id="h-orion">—</b></span>
+    <span id="h-fiware-badge" class="badge">NGSI-v2</span>
+  </div>
+</header>
+
+<main>
+
+<!-- Status bar dos serviços -->
+<div class="status-bar">
+  <span style="color:#8b949e;font-weight:500">Serviços:</span>
+  <div class="svc"><div class="dot-svc" id="svc-orion"></div><span>Orion CB</span></div>
+  <div class="svc"><div class="dot-svc" id="svc-sth"></div><span>STH-Comet</span></div>
+  <div class="svc"><div class="dot-svc" id="svc-ml"></div><span>ML Service</span></div>
+</div>
+
+<!-- Pipeline -->
+<div class="pipeline-wrap">
+  <div class="section-title">Linha de Produção</div>
+  <div class="pipeline">
+
+    <div class="pnode">
+      <div class="pbox IDLE">
+        <div class="icon idle">&#9201;</div>
+        <div class="pname">Fonte</div>
+      </div>
+      <div class="psub">1 pç / 25s</div>
+    </div>
+
+    <div class="conn" id="conn-0"></div>
+
+    <div class="pnode">
+      <div class="pbox" id="box-prensa">
+        <div class="sdot" id="dot-prensa"></div>
+        <div class="icon idle" id="icon-prensa">&#128295;</div>
+        <div class="pname">Prensa</div>
+        <div class="pval" id="val-prensa">—</div>
+        <div class="pstate" id="state-prensa">—</div>
+      </div>
+      <div class="fault-badge" id="fault-prensa"></div>
+      <div class="psub" id="sub-prensa"></div>
+    </div>
+
+    <div class="conn" id="conn-1"></div>
+
+    <div class="pnode">
+      <div class="pbox IDLE" style="width:110px;height:96px">
+        <div class="icon idle" style="font-size:2rem">&#128230;</div>
+        <div class="pname">Fila</div>
+        <div class="pval" id="val-buf">—</div>
+      </div>
+      <div style="width:90%;background:#21262d;border-radius:3px;height:5px;margin-top:4px;overflow:hidden">
+        <div id="buf-bar" style="height:100%;border-radius:3px;background:#e3b341;width:0%;transition:width .6s"></div>
+      </div>
+      <div class="psub">cap: 10</div>
+    </div>
+
+    <div class="conn" id="conn-2"></div>
+
+    <div class="pnode">
+      <div class="pbox" id="box-torno">
+        <div class="sdot" id="dot-torno"></div>
+        <div class="icon idle" id="icon-torno">&#9881;&#65039;</div>
+        <div class="pname">Torno</div>
+        <div class="pval" id="val-torno">—</div>
+        <div class="pstate" id="state-torno">—</div>
+      </div>
+      <div class="fault-badge" id="fault-torno"></div>
+      <div class="psub" id="sub-torno"></div>
+    </div>
+
+    <div class="conn" id="conn-3"></div>
+
+    <div class="pnode">
+      <div class="pbox" style="border-color:#238636;background:rgba(35,134,54,.07)">
+        <div class="icon">&#9989;</div>
+        <div class="pname">Saída</div>
+        <div class="pval" id="val-saida">—</div>
+      </div>
+      <div class="psub">peças finalizadas</div>
+    </div>
+
+  </div>
+</div>
+
+<!-- KPIs -->
+<div class="kpi-grid">
+  <div class="kpi hi"><div class="val" id="k-saida">—</div>
+    <div class="lbl">Peças finalizadas</div><div class="sub">saída torno</div></div>
+  <div class="kpi wa"><div class="val" id="k-wip">—</div>
+    <div class="lbl">WIP — Fila</div><div class="sub">ocupação atual</div></div>
+  <div class="kpi"><div class="val" id="k-avp">—</div>
+    <div class="lbl">Disponib. Prensa</div><div class="sub">working %</div></div>
+  <div class="kpi"><div class="val" id="k-avt">—</div>
+    <div class="lbl">Disponib. Torno</div><div class="sub">working %</div></div>
+  <div class="kpi"><div class="val" id="k-tp">—</div>
+    <div class="lbl">Throughput</div><div class="sub">pç/min (torno)</div></div>
+</div>
+
+<!-- Charts -->
+<div class="chart-grid">
+  <div class="card">
+    <h3>Produção acumulada</h3>
+    <canvas id="prodChart"></canvas>
+  </div>
+  <div class="card">
+    <h3>Disponibilidade</h3>
+    <canvas id="availChart"></canvas>
+  </div>
+  <div class="card">
+    <h3>Risco de FAULT (%)</h3>
+    <canvas id="faultChart"></canvas>
+  </div>
+  <div class="card chart-wide">
+    <h3>Distribuição de tempo (%)</h3>
+    <div style="height:100px;position:relative">
+      <canvas id="statusChart"></canvas>
+    </div>
+  </div>
+</div>
+
+<!-- Histórico STH-Comet -->
+<div class="card" style="margin-bottom:10px">
+  <h3>Histórico NGSI-v2 — STH-Comet <span id="hist-device-badge" class="badge">prensa-001</span></h3>
+  <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+    <button onclick="loadHistory('prensa-001')" style="font-size:0.7rem;padding:4px 10px;
+      background:transparent;border:1px solid #30363d;color:#8b949e;border-radius:5px;cursor:pointer">
+      Prensa</button>
+    <button onclick="loadHistory('torno-001')" style="font-size:0.7rem;padding:4px 10px;
+      background:transparent;border:1px solid #30363d;color:#8b949e;border-radius:5px;cursor:pointer">
+      Torno</button>
+  </div>
+  <div style="overflow-x:auto">
+    <table class="hist-table">
+      <thead><tr>
+        <th>Timestamp</th><th>Status</th>
+        <th>Produção</th><th>Working%</th><th>Blocked%</th>
+      </tr></thead>
+      <tbody id="hist-body">
+        <tr><td colspan="5" style="color:#484f58;text-align:center">
+          Carregando histórico...</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+</main>
+
+<script>
+// ── Config (endpoints via nginx proxy) ───────────────────────────────────────
+const ORION = '/orion';
+const STH   = '/sth';
+const ML    = '/ml';
+const FS    = 'factory';
+const FSP   = '/plant';
+const HEADERS = {
+  'fiware-service':     FS,
+  'fiware-servicepath': FSP,
+  'Accept': 'application/json',
+};
+
+// ── Chart setup ──────────────────────────────────────────────────────────────
+const CD = {responsive:true,animation:false,
+  plugins:{legend:{labels:{color:'#8b949e',boxWidth:12}}}};
+const AX = {
+  x:{ticks:{color:'#8b949e',maxTicksLimit:8},grid:{color:'#21262d'}},
+  y:{ticks:{color:'#8b949e'},grid:{color:'#21262d'}}
+};
+
+const prodChart = new Chart(document.getElementById('prodChart'),{
+  type:'line',
+  data:{labels:[],datasets:[
+    {label:'Prensa',data:[],borderColor:'#58a6ff',
+      backgroundColor:'rgba(88,166,255,.08)',tension:.3,fill:true},
+    {label:'Torno',data:[],borderColor:'#3fb950',
+      backgroundColor:'rgba(63,185,80,.08)',tension:.3,fill:true}
+  ]},
+  options:{...CD,scales:AX}
+});
+
+const availChart = new Chart(document.getElementById('availChart'),{
+  type:'bar',
+  data:{labels:['Prensa','Torno'],datasets:[{
+    label:'Working %',data:[0,0],
+    backgroundColor:['#238636','#238636'],borderRadius:4
+  }]},
+  options:{...CD,plugins:{...CD.plugins,
+    tooltip:{callbacks:{label:c=>` ${c.parsed.y.toFixed(1)}%`}}},
+    scales:{
+      x:{ticks:{color:'#8b949e'},grid:{color:'#21262d'}},
+      y:{min:0,max:100,ticks:{color:'#8b949e',callback:v=>v+'%'},
+        grid:{color:'#21262d'}}
+    }}
+});
+
+const faultChart = new Chart(document.getElementById('faultChart'),{
+  type:'bar',
+  data:{labels:['Prensa','Torno'],datasets:[{
+    label:'Fault risk %',data:[0,0],
+    backgroundColor:['rgba(248,81,73,.5)','rgba(248,81,73,.5)'],borderRadius:4
+  }]},
+  options:{...CD,plugins:{...CD.plugins,
+    tooltip:{callbacks:{label:c=>` ${c.parsed.y.toFixed(1)}%`}}},
+    scales:{
+      x:{ticks:{color:'#8b949e'},grid:{color:'#21262d'}},
+      y:{min:0,max:100,ticks:{color:'#8b949e',callback:v=>v+'%'},
+        grid:{color:'#21262d'}}
+    }}
+});
+
+const statusChart = new Chart(document.getElementById('statusChart'),{
+  type:'bar',
+  data:{labels:['Prensa','Torno'],datasets:[
+    {label:'Working',data:[0,0],backgroundColor:'#3fb950'},
+    {label:'Blocked',data:[0,0],backgroundColor:'#e3b341'},
+    {label:'Failed', data:[0,0],backgroundColor:'#f85149'},
+    {label:'Idle',   data:[0,0],backgroundColor:'#484f58'}
+  ]},
+  options:{...CD,maintainAspectRatio:false,indexAxis:'y',
+    scales:{
+      x:{stacked:true,min:0,max:100,
+        ticks:{color:'#8b949e',callback:v=>v+'%',maxTicksLimit:6},
+        grid:{color:'#21262d'}},
+      y:{stacked:true,ticks:{color:'#8b949e'},grid:{display:false}}
+    },
+    plugins:{...CD.plugins,
+      legend:{labels:{color:'#8b949e',boxWidth:10,font:{size:11}}},
+      tooltip:{callbacks:{label:c=>` ${c.dataset.label}: ${c.parsed.x.toFixed(1)}%`}}
+    }}
+});
+
+// ── Dados em memória ─────────────────────────────────────────────────────────
+const state = {
+  prensa: {status:'IDLE',productionCount:0,workingPct:0,blockedPct:0,failedPct:0},
+  torno:  {status:'IDLE',productionCount:0,workingPct:0,blockedPct:0,failedPct:0},
+  buffer: {occupancy:0},
+  faultRisk: {'prensa-001':0, 'torno-001':0},
+  prodHistory: {labels:[], prensa:[], torno:[]},
+};
+let sessionStart = null;
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+function fmt(v,d=1){ return isNaN(v)?'—':Number(v).toFixed(d); }
+function now(){ return new Date().toLocaleTimeString('pt-BR'); }
+
+function setConn(id, status){
+  const el=document.getElementById(id);
+  el.className='conn';
+  if(status==='RUNNING') el.classList.add('flowing');
+  else if(status==='BLOCKED') el.classList.add('blocked-flow');
+}
+
+function iconClass(devKey, sc){
+  if(sc==='FAULT')   return 'icon fault';
+  if(sc==='BLOCKED') return 'icon blocked';
+  if(sc==='IDLE')    return 'icon idle';
+  return devKey==='prensa'?'icon press':'icon running';
+}
+const ICONS = {
+  prensa:{RUNNING:'&#9881;&#65039;',IDLE:'&#128295;',
+          FAULT:'&#9888;&#65039;',BLOCKED:'&#9646;'},
+  torno: {RUNNING:'&#9881;&#65039;',IDLE:'&#9881;&#65039;',
+          FAULT:'&#9888;&#65039;',BLOCKED:'&#9646;'}
+};
+
+function updateNode(key, data, faultProb){
+  const sc = data.status||'IDLE';
+  document.getElementById(`box-${key}`).className=`pbox ${sc}`;
+  document.getElementById(`dot-${key}`).className=`sdot ${sc}`;
+  const ic=document.getElementById(`icon-${key}`);
+  ic.className=iconClass(key,sc);
+  ic.innerHTML=(ICONS[key]||{})[sc]||'&#9881;';
+  document.getElementById(`val-${key}`).textContent=data.productionCount??'—';
+  document.getElementById(`state-${key}`).textContent=sc;
+  // Fault badge
+  const badge=document.getElementById(`fault-${key}`);
+  const pct=Math.round((faultProb||0)*100);
+  if(faultProb>=0.6){
+    badge.textContent=`FAULT ${pct}%`;
+    badge.style.display='inline-block';
+  } else if(faultProb>=0.3){
+    badge.textContent=`risco ${pct}%`;
+    badge.style.display='inline-block';
+    badge.style.color='#e3b341';
+    badge.style.borderColor='rgba(227,179,65,.35)';
+  } else {
+    badge.style.display='none';
+  }
+}
+
+// ── Fetch helpers ─────────────────────────────────────────────────────────────
+async function orionGet(path){
+  const r=await fetch(`${ORION}${path}`,{headers:HEADERS});
+  if(!r.ok) throw new Error(`Orion ${r.status}`);
+  return r.json();
+}
+async function sthGet(path){
+  const r=await fetch(`${STH}${path}`,{headers:HEADERS});
+  if(!r.ok) throw new Error(`STH ${r.status}`);
+  return r.json();
+}
+async function mlGet(path){
+  const r=await fetch(`${ML}${path}`);
+  if(!r.ok) throw new Error(`ML ${r.status}`);
+  return r.json();
+}
+
+// ── Health checks ────────────────────────────────────────────────────────────
+async function checkServices(){
+  const check=async(id,fn)=>{
+    try{ await fn(); document.getElementById(id).className='dot-svc up'; }
+    catch{ document.getElementById(id).className='dot-svc down'; }
+  };
+  await check('svc-orion', ()=>orionGet('/v2/version'));
+  await check('svc-sth',   ()=>sthGet('/STH/v1/contextEntities'));
+  await check('svc-ml',    ()=>mlGet('/health'));
+}
+
+// ── Fetch context from Orion ─────────────────────────────────────────────────
+async function fetchContext(){
+  const entities = await orionGet(
+    '/v2/entities?type=Machine,Inventory&limit=10'
+  );
+  for(const e of entities){
+    const id=e.id; // e.g. urn:ngsi-v2:Machine:prensa-001
+    const key=id.includes('prensa')?'prensa':
+               id.includes('torno')?'torno':null;
+    if(!key) continue;
+    state[key]={
+      status:          e.status?.value          ?? 'IDLE',
+      productionCount: e.productionCount?.value ?? 0,
+      workingPct:      e.workingPct?.value       ?? 0,
+      blockedPct:      e.blockedPct?.value       ?? 0,
+      failedPct:       e.failedPct?.value        ?? 0,
+    };
+  }
+  // buffer
+  try{
+    const buf=await orionGet('/v2/entities/urn:ngsi-v2:Inventory:buffer-001');
+    state.buffer.occupancy=buf.occupancy?.value??0;
+  }catch{}
+}
+
+// ── Fetch ML predictions ─────────────────────────────────────────────────────
+async function fetchPredictions(){
+  try{
+    const d=await mlGet('/last_predictions');
+    state.faultRisk['prensa-001']=d['prensa-001']?.fault_probability??0;
+    state.faultRisk['torno-001'] =d['torno-001']?.fault_probability??0;
+  }catch{}
+}
+
+// ── Update UI ────────────────────────────────────────────────────────────────
+function updateUI(){
+  const p=state.prensa, t=state.torno;
+  document.getElementById('h-ts').textContent=now();
+  document.getElementById('h-orion').textContent='online';
+
+  if(!sessionStart) sessionStart=Date.now();
+
+  updateNode('prensa',p,state.faultRisk['prensa-001']);
+  updateNode('torno', t,state.faultRisk['torno-001']);
+
+  const wip=state.buffer.occupancy;
+  document.getElementById('val-buf').textContent=wip;
+  document.getElementById('val-saida').textContent=t.productionCount;
+  document.getElementById('buf-bar').style.width=Math.min((wip/10)*100,100)+'%';
+
+  setConn('conn-0',p.status); setConn('conn-1',p.status);
+  setConn('conn-2',t.status); setConn('conn-3',t.status);
+
+  // KPIs
+  document.getElementById('k-saida').textContent=t.productionCount;
+  document.getElementById('k-wip').textContent=wip;
+  document.getElementById('k-avp').textContent=fmt(p.workingPct)+'%';
+  document.getElementById('k-avt').textContent=fmt(t.workingPct)+'%';
+  const elapsed=(Date.now()-sessionStart)/60000||1;
+  document.getElementById('k-tp').textContent=fmt(t.productionCount/elapsed,2);
+
+  // Charts: disponibilidade
+  availChart.data.datasets[0].data=[p.workingPct,t.workingPct];
+  availChart.update();
+
+  // Fault risk
+  faultChart.data.datasets[0].data=[
+    (state.faultRisk['prensa-001']||0)*100,
+    (state.faultRisk['torno-001']||0)*100
+  ];
+  faultChart.update();
+
+  // Status distribution
+  statusChart.data.datasets[0].data=[p.workingPct, t.workingPct];
+  statusChart.data.datasets[1].data=[p.blockedPct, t.blockedPct];
+  statusChart.data.datasets[2].data=[p.failedPct,  t.failedPct];
+  const ip=Math.max(0,100-p.workingPct-p.blockedPct-p.failedPct);
+  const it=Math.max(0,100-t.workingPct-t.blockedPct-t.failedPct);
+  statusChart.data.datasets[3].data=[ip,it];
+  statusChart.update();
+
+  // Produção history (amostras em memória, máx 60)
+  const ts=new Date().toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  state.prodHistory.labels.push(ts);
+  state.prodHistory.prensa.push(p.productionCount);
+  state.prodHistory.torno.push(t.productionCount);
+  if(state.prodHistory.labels.length>60){
+    state.prodHistory.labels.shift();
+    state.prodHistory.prensa.shift();
+    state.prodHistory.torno.shift();
+  }
+  prodChart.data.labels=state.prodHistory.labels;
+  prodChart.data.datasets[0].data=state.prodHistory.prensa;
+  prodChart.data.datasets[1].data=state.prodHistory.torno;
+  prodChart.update();
+}
+
+// ── Histórico STH-Comet ──────────────────────────────────────────────────────
+async function loadHistory(deviceId){
+  document.getElementById('hist-device-badge').textContent=deviceId;
+  const entityId=`urn:ngsi-v2:Machine:${deviceId}`;
+  const url=`/STH/v1/contextEntities/type/Machine/id/${entityId}/attributes/status`+
+            `?hLimit=20&hOffset=0&lastN=20`;
+  try{
+    const d=await sthGet(
+      `/STH/v1/contextEntities/type/Machine/id/${encodeURIComponent(entityId)}`+
+      `/attributes/status?lastN=20`
+    );
+    const values=d?.contextResponses?.[0]?.contextElement
+                  ?.attributes?.[0]?.values??[];
+    const tbody=document.getElementById('hist-body');
+    if(!values.length){
+      tbody.innerHTML='<tr><td colspan="5" style="color:#484f58;text-align:center">'+
+        'Sem dados históricos ainda.</td></tr>';
+      return;
+    }
+    tbody.innerHTML=values.slice().reverse().map(v=>`
+      <tr>
+        <td>${new Date(v.recvTime).toLocaleString('pt-BR')}</td>
+        <td style="color:${v.attrValue==='FAULT'?'#f85149':
+                           v.attrValue==='BLOCKED'?'#e3b341':'#3fb950'}">
+          ${v.attrValue}</td>
+        <td>—</td><td>—</td><td>—</td>
+      </tr>`).join('');
+  }catch(e){
+    document.getElementById('hist-body').innerHTML=
+      `<tr><td colspan="5" style="color:#f85149">Erro: ${e.message}</td></tr>`;
+  }
+}
+
+// ── Loop principal ───────────────────────────────────────────────────────────
+async function tick(){
+  try{
+    await fetchContext();
+    await fetchPredictions();
+    updateUI();
+  }catch(e){
+    console.error('[dashboard]',e);
+  }
+}
+
+checkServices();
+setInterval(checkServices, 30000);
+
+tick();
+setInterval(tick, 3000);
+
+loadHistory('prensa-001');
+setInterval(()=>loadHistory(
+  document.getElementById('hist-device-badge').textContent
+), 15000);
+</script>
+</body>
+</html>
