@@ -4,9 +4,10 @@
 #
 # Revisão:
 #   [fix] MongoDB: removido --nojournal (inválido no MongoDB 5+)
-#   [fix] Healthchecks: substituídos por comandos disponíveis em cada imagem base
-#         - orion/iotagent/sth-comet: bash /dev/tcp (sem dependência externa)
-#         - ml-service: python3 urllib (disponível na imagem python:3.11-slim)
+#   [fix] Healthchecks: corrigidos para usar ferramentas nativas de cada imagem
+#         - orion: curl --fail /v2/entities (curl disponível; /version não toca DB)
+#         - iotagent/sth-comet: node -e require('http').get (node disponível)
+#         - ml-service: python3 urllib (python3 disponível na imagem slim)
 #   [fix] sth-comet healthcheck: era /STH/v1/contextEntities (retorna 404 sem dados)
 #         substituído por verificação de porta via bash /dev/tcp
 #   [fix] dashboard depends_on: adicionado condition: service_healthy para todos
@@ -126,9 +127,11 @@ services:
     command: -dbURI mongodb://mongodb:27017 -logLevel WARN
     logging: *default-logging
     healthcheck:
-      # fiware/orion usa debian:bullseye-slim — sem curl nem wget por padrão.
-      # bash /dev/tcp é um built-in do bash que não precisa de ferramentas externas.
-      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/1026'"]
+      # curl está disponível na imagem fiware/orion (base debian com curl instalado).
+      # Conforme o Dockerfile oficial do Orion, /v2/entities é o endpoint correto:
+      # /version responde mesmo com MongoDB down; /v2/entities toca o banco.
+      test: ["CMD", "curl", "--fail", "-s",
+             "http://localhost:1026/v2/entities?limit=1"]
       interval: 15s
       timeout: 5s
       retries: 5
