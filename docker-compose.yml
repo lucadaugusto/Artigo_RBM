@@ -1,91 +1,44 @@
-version: "3.8"
-
-# ══════════════════════════════════════════════════════════════════════════════
-# FIWARE Stack — NGSI-v2 — AWS EC2 t3.medium
-#
-# Serviços:
-#   mosquitto    — broker MQTT (porta pública 1883, restringir por Security Group)
-#   iot-agent    — IoT Agent MQTT → NGSI-v2 (porta interna 4041)
-#   orion        — Context Broker NGSI-v2 (porta interna 1026)
-#   mongodb      — estado atual do Orion (porta interna 27017)
-#   sth-comet    — séries temporais históricas (porta interna 8666)
-#   mongodb-hist — banco histórico exclusivo do STH-Comet
-#   ml-service   — FastAPI XGBoost (porta interna 5001)
-#   dashboard    — frontend HTML/JS servido por nginx (porta pública 8080)
-#
-# Portas públicas (abrir no Security Group da EC2):
-#   1883  — MQTT (acesso restrito ao IP da máquina edge)
-#   8080  — Dashboard (acesso público ou VPN)
-#
-# Portas internas (NÃO expor publicamente):
-#   1026  — Orion CB
-#   4041  — IoT Agent
-#   8666  — STH-Comet
-#   5001  — ML Service
-#   27017 — MongoDB (ambos)
-# ══════════════════════════════════════════════════════════════════════════════
-
-networks:
-  fiware-net:
-    driver: bridge
-
-volumes:
-  mongo-data:
-  mongo-hist-data:
-  ml-models:
+version: "3.9"
 
 services:
 
-  # ── Mosquitto ────────────────────────────────────────────────────────────────
-  mosquitto:
-    image: eclipse-mosquitto:2.0
-    container_name: mosquitto
-    restart: unless-stopped
-    networks:
-      - fiware-net
-    ports:
-      - "1883:1883"
-    volumes:
-      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
-    healthcheck:
-      test: ["CMD", "mosquitto_sub", "-t", "$$SYS/#", "-C", "1", "-W", "3"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # ── MongoDB (Orion) ──────────────────────────────────────────────────────────
+  # ---------------------------------------------------------
+  # MongoDB (principal)
+  # ---------------------------------------------------------
   mongodb:
-    image: mongo:6.0
+    image: mongo:4.4
     container_name: mongodb
     restart: unless-stopped
     networks:
       - fiware-net
     volumes:
       - mongo-data:/data/db
-    command: --nojournal
     healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      test: ["CMD", "mongo", "--eval", "db.runCommand({ ping: 1 })"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # ── MongoDB histórico (STH-Comet) ────────────────────────────────────────────
+  # ---------------------------------------------------------
+  # MongoDB Histórico (para STH-Comet)
+  # ---------------------------------------------------------
   mongodb-hist:
-    image: mongo:6.0
+    image: mongo:4.4
     container_name: mongodb-hist
     restart: unless-stopped
     networks:
       - fiware-net
     volumes:
       - mongo-hist-data:/data/db
-    command: --nojournal
     healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      test: ["CMD", "mongo", "--eval", "db.runCommand({ ping: 1 })"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # ── Orion Context Broker ─────────────────────────────────────────────────────
+  # ---------------------------------------------------------
+  # Orion Context Broker
+  # ---------------------------------------------------------
   orion:
     image: fiware/orion:3.10.1
     container_name: orion
@@ -95,19 +48,49 @@ services:
     depends_on:
       mongodb:
         condition: service_healthy
-    # Exposto apenas internamente; acesse via nginx ou diretamente do dashboard
     expose:
       - "1026"
     ports:
-      - "127.0.0.1:1026:1026"   # acessível só no host EC2 (não público)
-    command: -dbURI mongodb://mongodb:27017 -logLevel WARN
+      - "127.0.0.1:1026:1026"
+    command:
+      - "-dbURI"
+      - "mongodb://mongodb:27017"
+      - "-db"
+      - "orion"
+      - "-logLevel"
+      - "WARN"
+      - "-noCache"
+      - "-corsOrigin"
+      - "__ALL"
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:1026/version"]
-      interval: 15s
+      interval: 20s
+      timeout: 10s
+      retries: 10
+
+  # ---------------------------------------------------------
+  # Mosquitto MQTT Broker
+  # ---------------------------------------------------------
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: mosquitto
+    restart: unless-stopped
+    networks:
+      - fiware-net
+    ports:
+      - "1883:1883"
+    volumes:
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-conf:/mosquitto/config
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-t", "$SYS/#", "-C", "1"]
+      interval: 10s
       timeout: 5s
       retries: 5
 
-  # ── IoT Agent MQTT ───────────────────────────────────────────────────────────
+  # ---------------------------------------------------------
+  # IoT Agent UL MQTT
+  # ---------------------------------------------------------
   iot-agent:
     image: fiware/iotagent-ul:3.4.0
     container_name: iot-agent
@@ -119,36 +102,25 @@ services:
         condition: service_healthy
       mosquitto:
         condition: service_healthy
-    expose:
-      - "4041"
-    ports:
-      - "127.0.0.1:4041:4041"
     environment:
       - IOTA_CB_HOST=orion
       - IOTA_CB_PORT=1026
-      - IOTA_CB_NGSI_VERSION=v2
       - IOTA_NORTH_PORT=4041
       - IOTA_REGISTRY_TYPE=mongodb
       - IOTA_MONGO_HOST=mongodb
       - IOTA_MONGO_PORT=27017
-      - IOTA_MONGO_DB=iotagentul
+      - IOTA_MONGO_DB=iotagent
+      - IOTA_PROVIDER_URL=http://iot-agent:4041
       - IOTA_MQTT_HOST=mosquitto
       - IOTA_MQTT_PORT=1883
-      - IOTA_MQTT_KEEPALIVE=60
-      # Prefixo do tópico MQTT: /<apikey>/<device_id>/attrs
-      - IOTA_DEFAULT_RESOURCE=/iot/d
-      - IOTA_LOG_LEVEL=WARN
-      - IOTA_TIMESTAMP=true
-      - IOTA_AUTOCAST=true
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:4041/iot/about"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
+    ports:
+      - "4041:4041"
 
-  # ── STH-Comet ────────────────────────────────────────────────────────────────
+  # ---------------------------------------------------------
+  # STH-Comet (Histórico)
+  # ---------------------------------------------------------
   sth-comet:
-    image: fiware/sth-comet:2.10.0
+    image: fiware/sth-comet:3.4.0
     container_name: sth-comet
     restart: unless-stopped
     networks:
@@ -156,71 +128,45 @@ services:
     depends_on:
       mongodb-hist:
         condition: service_healthy
-    expose:
-      - "8666"
-    ports:
-      - "127.0.0.1:8666:8666"
     environment:
       - STH_HOST=0.0.0.0
       - STH_PORT=8666
-      - DB_URI=mongodb-hist:27017
-      - DB_PREFIX=sth_
-      - DEFAULT_SERVICE=factory
-      - DEFAULT_SERVICE_PATH=/plant
-      - TRUNCATION_EXPIREAFTERSECONDS=0   # sem expiração; ajuste para produção
-      - LOGOPS_LEVEL=WARN
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8666/STH/v1/contextEntities"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-
-  # ── ML Service ───────────────────────────────────────────────────────────────
-  ml-service:
-    build:
-      context: ./ml_service
-      dockerfile: Dockerfile
-    container_name: ml-service
-    restart: unless-stopped
-    networks:
-      - fiware-net
-    expose:
-      - "5001"
+      - DB_URI=mongodb://mongodb-hist:27017
     ports:
-      - "127.0.0.1:5001:5001"
-    volumes:
-      - ml-models:/app/models   # model.pkl persistido entre restarts
-    environment:
-      - MODEL_PATH=/app/models/model.pkl
-      - FEATURE_PATH=/app/models/feature_columns.json
-      - ORION_URL=http://orion:1026
-    depends_on:
-      orion:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:5001/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
+      - "8666:8666"
 
-  # ── Dashboard ────────────────────────────────────────────────────────────────
+  # ---------------------------------------------------------
+  # Dashboard
+  # ---------------------------------------------------------
   dashboard:
-    image: nginx:1.25-alpine
+    image: your-dashboard-image
     container_name: dashboard
     restart: unless-stopped
     networks:
       - fiware-net
     ports:
-      - "0.0.0.0:8080:80"       # único serviço com porta pública além do MQTT
-    volumes:
-      - ./dashboard:/usr/share/nginx/html:ro
-      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-    depends_on:
-      - orion
-      - sth-comet
-      - ml-service
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:80"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
+      - "8080:80"
+
+  # ---------------------------------------------------------
+  # ML Service
+  # ---------------------------------------------------------
+  ml-service:
+    image: your-ml-service-image
+    container_name: ml-service
+    restart: unless-stopped
+    networks:
+      - fiware-net
+    ports:
+      - "5000:5000"
+
+# ---------------------------------------------------------
+# Networks & Volumes
+# ---------------------------------------------------------
+networks:
+  fiware-net:
+
+volumes:
+  mongo-data:
+  mongo-hist-data:
+  mosquitto-data:
+  mosquitto-conf:
