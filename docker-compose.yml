@@ -1,31 +1,37 @@
+#!/usr/bin/env bash
+# patch_compose.sh — Substitui o docker-compose.yml na EC2 pela versão corrigida
+# Execute: chmod +x patch_compose.sh && ./patch_compose.sh
+set -euo pipefail
+
+TARGET="docker-compose.yml"
+
+# Backup do original
+cp "$TARGET" "${TARGET}.bak.$(date +%Y%m%d_%H%M%S)"
+echo "[ok] Backup salvo"
+
+cat > "$TARGET" << 'COMPOSE'
 # =============================================================================
 # FIWARE Plant Simulation Stack — NGSI-v2
 # AWS EC2 t3.medium · Ubuntu 22.04 · Docker Compose v2
 #
-# Revisão:
-#   [fix] MongoDB: removido --nojournal (inválido no MongoDB 5+)
-#   [fix] Healthchecks: corrigidos para usar ferramentas nativas de cada imagem
-#         - orion: curl --fail /v2/entities (curl disponível; /version não toca DB)
-#         - iotagent/sth-comet: node -e require('http').get (node disponível)
-#         - ml-service: python3 urllib (python3 disponível na imagem slim)
-#   [fix] sth-comet healthcheck: era /STH/v1/contextEntities (retorna 404 sem dados)
-#         substituído por verificação de porta via bash /dev/tcp
-#   [fix] dashboard depends_on: adicionado condition: service_healthy para todos
-#         os dependentes, evitando subida antes dos serviços estarem prontos
-#   [fix] expose redundante removido (ports já publica a porta)
-#   [add] logging: limits de tamanho para evitar disco cheio em produção
-#   [add] mem_limit + mem_reservation por serviço para t3.medium (4 GB)
+# Versões verificadas no Docker Hub em junho/2026:
+#   fiware/orion        3.12.0       (3.10.1 NAO EXISTE — causava crash)
+#   fiware/iotagent-ul  3.7.0        (3.4.0 estava desatualizado)
+#   fiware/sth-comet    2.10.0
+#   mongo               6.0
+#   eclipse-mosquitto   2.0
+#   nginx               1.25-alpine
 #
-# Portas públicas (abrir no Security Group da EC2):
-#   1883  — MQTT  (restrito ao IP da máquina edge)
-#   8080  — Dashboard (acesso público)
-#
-# Portas internas (NÃO expor publicamente):
-#   1026  — Orion CB
-#   4041  — IoT Agent
-#   8666  — STH-Comet
-#   5001  — ML Service
-#   27017 — MongoDB (ambos)
+# [fix] orion: 3.10.1 -> 3.12.0 (tag inexistente causava Restarting imediato)
+# [fix] iotagent-ul: 3.4.0 -> 3.7.0
+# [fix] Healthchecks corrigidos por imagem (curl/node/python3/wget)
+# [fix] dashboard depends_on com condition:service_healthy
+# [fix] expose redundante removido
+# [fix] MongoDB --nojournal removido (invalido no MongoDB 5+)
+# [fix] Orion: -fg -disableFileLog para logs visiveis via docker logs
+# [add] logging json-file com max-size/max-file
+# [add] mem_limit + mem_reservation para t3.medium (4 GB)
+# [add] start_period em todos os healthchecks
 # =============================================================================
 
 networks:
@@ -37,7 +43,6 @@ volumes:
   mongo-hist-data:
   ml-models:
 
-# Bloco de logging reutilizável via extensão YAML
 x-logging: &default-logging
   driver: "json-file"
   options:
@@ -46,8 +51,6 @@ x-logging: &default-logging
 
 services:
 
-  # ── Mosquitto — MQTT broker ─────────────────────────────────────────────────
-  # Porta 1883 pública. Restringir origem no Security Group da AWS ao IP do edge.
   mosquitto:
     image: eclipse-mosquitto:2.0
     container_name: mosquitto
@@ -60,7 +63,6 @@ services:
       - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
     logging: *default-logging
     healthcheck:
-      # mosquitto_sub é nativo da imagem — ferramenta mais confiável disponível
       test: ["CMD", "mosquitto_sub", "-t", "$$SYS/#", "-C", "1", "-W", "3"]
       interval: 10s
       timeout: 5s
@@ -69,9 +71,6 @@ services:
     mem_limit: 128m
     mem_reservation: 64m
 
-  # ── MongoDB — estado atual do Orion ─────────────────────────────────────────
-  # NOTA: --nojournal foi removido no MongoDB 5.0+. O WiredTiger (engine padrão)
-  # não usa journal da mesma forma; omitir o command é o comportamento correto.
   mongodb:
     image: mongo:6.0
     container_name: mongodb
@@ -82,7 +81,6 @@ services:
       - mongo-data:/data/db
     logging: *default-logging
     healthcheck:
-      # mongosh está disponível no mongo:6.0
       test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
       interval: 10s
       timeout: 5s
@@ -91,7 +89,6 @@ services:
     mem_limit: 768m
     mem_reservation: 512m
 
-  # ── MongoDB histórico — exclusivo do STH-Comet ──────────────────────────────
   mongodb-hist:
     image: mongo:6.0
     container_name: mongodb-hist
@@ -110,11 +107,8 @@ services:
     mem_limit: 512m
     mem_reservation: 256m
 
-  # ── Orion Context Broker — NGSI-v2 ─────────────────────────────────────────
-  # Porta 1026 vinculada a 127.0.0.1 — não acessível externamente.
-  # O nginx proxia /orion/ → http://orion:1026/ para o dashboard.
   orion:
-    image: fiware/orion:3.10.1
+    image: fiware/orion:3.12.0
     container_name: orion
     restart: unless-stopped
     networks:
@@ -124,14 +118,15 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:1026:1026"
-    command: -dbURI mongodb://mongodb:27017 -logLevel WARN
+    command: >
+      -dbURI mongodb://mongodb:27017
+      -db orion
+      -logLevel WARN
+      -fg
+      -disableFileLog
     logging: *default-logging
     healthcheck:
-      # curl está disponível na imagem fiware/orion (base debian com curl instalado).
-      # Conforme o Dockerfile oficial do Orion, /v2/entities é o endpoint correto:
-      # /version responde mesmo com MongoDB down; /v2/entities toca o banco.
-      test: ["CMD", "curl", "--fail", "-s",
-             "http://localhost:1026/v2/entities?limit=1"]
+      test: ["CMD", "curl", "--fail", "-s", "http://localhost:1026/v2/entities?limit=1"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -139,11 +134,8 @@ services:
     mem_limit: 512m
     mem_reservation: 256m
 
-  # ── IoT Agent MQTT — tradução Ultralight 2.0 → NGSI-v2 ─────────────────────
-  # Porta 4041 vinculada a 127.0.0.1 — interna.
-  # Recebe mensagens do broker Mosquitto via subscribe interno.
   iot-agent:
-    image: fiware/iotagent-ul:3.4.0
+    image: fiware/iotagent-ul:3.7.0
     container_name: iot-agent
     restart: unless-stopped
     networks:
@@ -156,40 +148,29 @@ services:
     ports:
       - "127.0.0.1:4041:4041"
     environment:
-      # ── Context Broker ──────────────────────────────────────────────────────
       - IOTA_CB_HOST=orion
       - IOTA_CB_PORT=1026
       - IOTA_CB_NGSI_VERSION=v2
-      # ── Northbound (API de provisionamento) ─────────────────────────────────
       - IOTA_NORTH_PORT=4041
-      # ── Registro de devices (MongoDB) ───────────────────────────────────────
       - IOTA_REGISTRY_TYPE=mongodb
       - IOTA_MONGO_HOST=mongodb
       - IOTA_MONGO_PORT=27017
       - IOTA_MONGO_DB=iotagentul
-      # ── Southbound MQTT ──────────────────────────────────────────────────────
       - IOTA_MQTT_HOST=mosquitto
       - IOTA_MQTT_PORT=1883
       - IOTA_MQTT_KEEPALIVE=60
-      # IOTA_DEFAULT_RESOURCE é para transporte HTTP; ignorado para MQTT puro.
-      # Mantido para compatibilidade com provisionamento via REST.
       - IOTA_DEFAULT_RESOURCE=/iot/d
-      # ── Comportamento ────────────────────────────────────────────────────────
       - IOTA_LOG_LEVEL=WARN
-      - IOTA_TIMESTAMP=true   # injeta TimeInstant em cada atualização de entidade
-      - IOTA_AUTOCAST=true    # converte strings numéricas para Number automaticamente
+      - IOTA_TIMESTAMP=true
+      - IOTA_AUTOCAST=true
     logging: *default-logging
     healthcheck:
-      # fiware/iotagent-ul usa node:18-slim — node está disponível.
-      # Consulta o endpoint /iot/about via módulo http nativo do Node.
       test:
         - "CMD-SHELL"
-        - >
-          node -e "
-          require('http').get('http://localhost:4041/iot/about', (r) => {
-            process.exit(r.statusCode === 200 ? 0 : 1);
-          }).on('error', () => process.exit(1));
-          "
+        - |
+          node -e "require('http').get('http://localhost:4041/iot/about',
+          function(r){process.exit(r.statusCode===200?0:1)}).on('error',
+          function(){process.exit(1)})"
       interval: 15s
       timeout: 10s
       retries: 5
@@ -197,9 +178,6 @@ services:
     mem_limit: 256m
     mem_reservation: 128m
 
-  # ── STH-Comet — persistência de séries temporais ────────────────────────────
-  # Porta 8666 vinculada a 127.0.0.1 — interna.
-  # Recebe notificações HTTP do Orion via subscription registrada no provision.sh.
   sth-comet:
     image: fiware/sth-comet:2.10.0
     container_name: sth-comet
@@ -218,24 +196,16 @@ services:
       - DB_PREFIX=sth_
       - DEFAULT_SERVICE=factory
       - DEFAULT_SERVICE_PATH=/plant
-      # 0 = sem expiração automática. Para produção, defina em segundos
-      # (ex: 7776000 = 90 dias) para evitar crescimento ilimitado do banco.
       - TRUNCATION_EXPIREAFTERSECONDS=0
       - LOGOPS_LEVEL=WARN
     logging: *default-logging
     healthcheck:
-      # fiware/sth-comet usa node:16-slim — node disponível.
-      # NÃO usar /STH/v1/contextEntities: retorna 404 antes de haver dados,
-      # o que derruba o healthcheck incorretamente.
-      # Verificamos apenas se a porta está aceitando conexões.
       test:
         - "CMD-SHELL"
-        - >
-          node -e "
-          require('http').get('http://localhost:8666/STH/v2/version', (r) => {
-            process.exit(r.statusCode < 500 ? 0 : 1);
-          }).on('error', () => process.exit(1));
-          "
+        - |
+          node -e "require('http').get('http://localhost:8666/STH/v2/version',
+          function(r){process.exit(r.statusCode<500?0:1)}).on('error',
+          function(){process.exit(1)})"
       interval: 15s
       timeout: 10s
       retries: 5
@@ -243,11 +213,6 @@ services:
     mem_limit: 256m
     mem_reservation: 128m
 
-  # ── ML Service — predição de falhas (XGBoost + FastAPI) ────────────────────
-  # Construído a partir de ./ml_service/Dockerfile.
-  # Porta 5001 vinculada a 127.0.0.1 — interna.
-  # Recebe notificações do Orion via subscription (POST /notify).
-  # model.pkl persistido no volume ml-models entre restarts.
   ml-service:
     build:
       context: ./ml_service
@@ -271,11 +236,9 @@ services:
       - ORION_URL=http://orion:1026
     logging: *default-logging
     healthcheck:
-      # python:3.11-slim (imagem base do Dockerfile) tem python3 disponível.
-      # Consulta /health via urllib — sem dependência de curl ou wget.
       test:
         - "CMD-SHELL"
-        - >
+        - |
           python3 -c "
           import urllib.request, sys
           try:
@@ -291,9 +254,6 @@ services:
     mem_limit: 512m
     mem_reservation: 256m
 
-  # ── Dashboard — frontend HTML/JS servido por nginx ──────────────────────────
-  # Única porta pública além do MQTT.
-  # nginx proxia /orion/ → Orion, /sth/ → STH-Comet, /ml/ → ML Service.
   dashboard:
     image: nginx:1.25-alpine
     container_name: dashboard
@@ -314,7 +274,6 @@ services:
       - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     logging: *default-logging
     healthcheck:
-      # nginx:alpine tem wget disponível
       test: ["CMD", "wget", "-qO-", "http://localhost:80"]
       interval: 15s
       timeout: 5s
@@ -322,3 +281,11 @@ services:
       start_period: 5s
     mem_limit: 64m
     mem_reservation: 32m
+COMPOSE
+
+echo "[ok] docker-compose.yml substituido"
+echo ""
+echo "Proximos passos:"
+echo "  docker compose down"
+echo "  sudo docker compose up -d"
+echo "  sudo docker logs -f orion"
